@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg[binary]
+geoalchemy2
+streamlit
+requests
+scikit-learn
+pandas
+twilio
+streamlit-folium
+reportlab
+streamlit-js-eval
