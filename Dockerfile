@@ -8,6 +8,9 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install the Python dependencies
+# We create a virtual environment inside the container for best practices
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the trained model file into the container
@@ -17,4 +20,4 @@ COPY rf_crop_recommendation_model.pkl .
 COPY ./backend .
 
 # Command to run the app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
