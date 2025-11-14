@@ -18,10 +18,10 @@ COPY requirements.txt .
 # 3. Install Python dependencies
 # Must install GDAL first to match system library
 RUN pip install --no-cache-dir GDAL==$(gdal-config --version | awk -F'[.]' '{print $1"."$2}')
-RUN pip install --no-cache-dir -r backend-requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 4. Copy the application code and model
-COPY main.py .
+COPY backend/main.py .
 COPY rf_crop_recommendation_model.pkl .
 
 # 5. Expose the port FastAPI will run on

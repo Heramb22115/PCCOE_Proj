@@ -99,13 +99,18 @@ class BoundingBox(BaseModel):
     min_lon: float
     min_lat: float
     max_lon: float
-    max_lat:
+    max_lat: float
     dev_mode: bool = False
     mock_site: Optional[str] = "Sanjay Park, India (Degraded)"
 
 class CropPredictionInputs(BaseModel):
-    N: float; P: float; K: float;
-    temperature: float; humidity: float; ph: float; rainfall: float
+    N: float
+    P: float
+    K: float
+    temperature: float
+    humidity: float
+    ph: float
+    rainfall: float
 
 class CarbonCreditInputs(BaseModel):
     crop_type: str
