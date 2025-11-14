@@ -14,17 +14,10 @@ RUN apt-get update && apt-get install -y \
     libgdal-dev \
     && rm -rf /var/lib/apt/lists/*
 
-<<<<<<< HEAD
 # 2. Copy requirements and install Python dependencies
 COPY requirements.txt .
 # Install GDAL first, then the rest
 RUN pip install --no-cache-dir GDAL==$(gdal-config --version | awk -F'[.]' '{print $1"."$2}')
-=======
-# Install the Python dependencies
-# We create a virtual environment inside the container for best practices
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
->>>>>>> 6aa45908e9d9b7968563867b3d15a41259813bf4
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 3. Copy the rest of the application code
@@ -39,14 +32,9 @@ echo "Starting Streamlit Frontend on port 8501..."\n\
 streamlit run app.py --server.port 8501 --server.address 0.0.0.0 --server.enableCORS false \n\
 ' > /app/start.sh && chmod +x /app/start.sh
 
-<<<<<<< HEAD
 # Expose ports for Streamlit (UI) and FastAPI (Backend)
 EXPOSE 8501
 EXPOSE 8000
 
 # Run the startup script
 CMD ["/app/start.sh"]
-=======
-# Command to run the app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
->>>>>>> 6aa45908e9d9b7968563867b3d15a41259813bf4
