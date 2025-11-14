@@ -9,7 +9,8 @@ import pandas as pd
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from geoalchemy2 import Geography, WKTElement
+# ⭐️ 1. IMPORT 'Geometry' TYPE ⭐️
+from geoalchemy2 import Geography, WKTElement, Geometry
 from pydantic import BaseModel
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
@@ -18,8 +19,8 @@ from sqlalchemy import (Column, Integer, MetaData, String, Table, create_engine,
                         func, inspect, insert, select, text)
 from sqlalchemy.exc import OperationalError
 from twilio.rest import Client
-from contextlib import asynccontextmanager  # <-- Import asynccontextmanager
-from dotenv import load_dotenv  # <-- Import dotenv
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 
 # --- NEW: Import CORSMiddleware ---
 from fastapi.middleware.cors import CORSMiddleware
@@ -115,7 +116,7 @@ class CropPredictionInputs(BaseModel):
 class CarbonCreditInputs(BaseModel):
     crop_type: str
     area_hectares: float
-    age_years: int = 10  # <-- FIXED: Defaulted age to 10
+    age_years: int = 10
 
 class ZoneRegistration(BaseModel):
     zone_name: str
@@ -202,7 +203,7 @@ async def lifespan(app: FastAPI):
     print("Starting background fire alert worker (30 min loop)...")
     asyncio.create_task(fire_alert_worker())
     
-    yield  # <-- This is where the application runs
+    yield
 
     print("Application shutdown...")
     # Clean up resources (if any)
@@ -210,25 +211,20 @@ async def lifespan(app: FastAPI):
 # --- Initialize FastAPI App ---
 app = FastAPI(title="Reforestation Project API", lifespan=lifespan)
 
-# --- ⭐️ NEW: ADD CORS MIDDLEWARE ⭐️ ---
-# This block is essential for your separate frontend to connect
+# --- ADD CORS MIDDLEWARE ---
 origins = [
     "http://localhost",
-    "http://localhost:8501",  # Common port for Streamlit
-    # Add the IP or domain of your frontend machine here
-    # e.g., "http://192.168.1.10:8501"
-    "*"  # Allows all origins (good for development, be specific in production)
+    "http://localhost:8501",
+    "*"  # Allows all origins
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-# --- END OF NEW BLOCK ---
-
 
 def send_whatsapp_message(to_number: str, body: str):
     if not twilio_client:
@@ -247,7 +243,6 @@ def read_root(): return {"message": "Welcome to the AI-Driven Reforestation API!
 
 @app.get("/api/health", tags=["Monitoring"])
 def get_health_check():
-    # Health check logic moved to startup lifespan
     return {"api_status": "ok", "database_status": "connected (checked on startup)"}
 
 # --- Data Acquisition Endpoints ---
@@ -318,12 +313,10 @@ def get_fire_events(bbox: BoundingBox):
 def get_crop_recommendation(inputs: CropPredictionInputs):
     if crop_model is None: raise HTTPException(status_code=503, detail="Crop model is not loaded.")
     try:
-        # Prepare features in the exact order the model expects
         input_data = [[
             inputs.N, inputs.P, inputs.K, 
             inputs.temperature, inputs.humidity, inputs.ph, inputs.rainfall
         ]]
-        # Define column names in the same order
         columns = ['N', 'P', 'K', 'temperature', 'humidity', 'ph', 'rainfall']
         
         input_df = pd.DataFrame(input_data, columns=columns)
@@ -339,7 +332,7 @@ def get_full_report(coordinates: PlotCoordinates):
     print(f"Generating full report for {coordinates.dict()}")
     crop_recommendation = {}
     recommended_crop = None
-    is_already_registered = False # <-- FIXED: Flag for UI
+    is_already_registered = False
     
     if coordinates.dev_mode:
         if coordinates.mock_site not in _MOCK_DATA_CATALOG:
@@ -372,12 +365,11 @@ def get_full_report(coordinates: PlotCoordinates):
                 func.ST_DWithin(
                     registered_zones_table.c.location,
                     text(f"ST_SetSRID(ST_GeomFromText('{point_wkt}'), 4326)::geography"),
-                    500 # 500 meters
+                    500
                 )
             )
             existing_zone = conn.execute(stmt).first()
             if existing_zone:
-                # <-- FIXED: Set flag instead of raising error
                 is_already_registered = True
                 print(f"Warning: Location is already part of zone '{existing_zone.zone_name}'")
         
@@ -405,7 +397,7 @@ def get_full_report(coordinates: PlotCoordinates):
             recommended_crop = crop_recommendation.get("recommended_crop")
         
         except HTTPException as e:
-            raise e # Re-raise HTTP errors (like 409)
+            raise e
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"An error occurred during live data fetching: {str(e)}")
 
@@ -417,7 +409,6 @@ def get_full_report(coordinates: PlotCoordinates):
         suitability_analysis["recommendation"] = "Suitable for Agriculture"
         suitability_analysis["reason"] = f"The model recommended '{recommended_crop}', which is a short-term agricultural crop. This area is better for farming."
     
-    # <-- FIXED: Return flat structure for UI
     return {
         "report_status": "Success",
         "coordinates": coordinates.dict(),
@@ -437,11 +428,10 @@ def estimate_carbon_credits(inputs: CarbonCreditInputs):
     rate = _MOCK_CARBON_RATES.get(crop_key, _MOCK_CARBON_RATES["default"])
     total_co2_sequestered = rate * inputs.area_hectares * inputs.age_years
     
-    # <-- FIXED: Return flat structure for UI
     total_per_year = rate * inputs.area_hectares
     return {
         "total_sequestration_per_year_tonnes": round(total_per_year, 2),
-        "carbon_credits_per_year": round(total_per_year, 2), # Assuming 1 credit = 1 tonne
+        "carbon_credits_per_year": round(total_per_year, 2),
         "total_at_end_of_period_tonnes": round(total_co2_sequestered, 2),
         "calculation_details": {
             "crop_type": inputs.crop_type,
@@ -463,7 +453,7 @@ def register_zone(registration: ZoneRegistration):
                 func.ST_DWithin(
                     registered_zones_table.c.location,
                     text(f"ST_SetSRID(ST_GeomFromText('{point_wkt}'), 4326)::geography"),
-                    100 # 100 meters
+                    100
                 )
             )
             existing_zone = conn.execute(stmt_check).first()
@@ -506,7 +496,6 @@ def register_zone(registration: ZoneRegistration):
 # --- PDF Report Endpoint ---
 @app.post("/api/get-pdf-report", tags=["Master Report"])
 def get_pdf_report(report_data_json: Dict[str, Any]):
-    # This endpoint now accepts the flat JSON from the /get-full-report response
     try:
         buffer = io.BytesIO()
         p = canvas.Canvas(buffer, pagesize=letter)
@@ -594,12 +583,9 @@ def get_pdf_report(report_data_json: Dict[str, Any]):
         print(f"Error generating PDF: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
 
-# --- NEW: Background Fire Alert Worker ---
+# --- Background Fire Alert Worker ---
 async def fire_alert_worker():
-    """
-    Runs in the background, checking for fires every 30 minutes.
-    """
-    await asyncio.sleep(10) # Initial delay
+    await asyncio.sleep(10)
     
     while True:
         print("WORKER: Running scheduled fire check for all registered zones...")
@@ -610,11 +596,15 @@ async def fire_alert_worker():
             
         try:
             with engine.connect() as conn:
+                
+                # ⭐️ 2. CAST to Geometry before calling ST_X/ST_Y ⭐️
+                location_as_geometry = func.cast(registered_zones_table.c.location, Geometry)
+                
                 stmt = select(
                     registered_zones_table.c.zone_name,
                     registered_zones_table.c.phone_number,
-                    func.ST_X(registered_zones_table.c.location).label('lon'),
-                    func.ST_Y(registered_zones_table.c.location).label('lat')
+                    func.ST_X(location_as_geometry).label('lon'), # <-- FIXED
+                    func.ST_Y(location_as_geometry).label('lat')  # <-- FIXED
                 )
                 all_zones = conn.execute(stmt).fetchall()
                 print(f"WORKER: Found {len(all_zones)} zone(s) to check.")
@@ -648,19 +638,16 @@ async def fire_alert_worker():
                     else:
                         print(f"WORKER: No fires found for '{zone_name}'.")
 
-                    await asyncio.sleep(5) 
+                    await asyncio.sleep(5)
             
         except Exception as e:
-            print(f"WORKER: Error during fire check: {e}")
+            print(f"WORKER: Error during fire check: {e}") # <-- This will now log the new error if any
 
         print("WORKER: Fire check complete. Sleeping for 30 minutes...")
         await asyncio.sleep(1800)
 
 @app.post("/api/trigger-fire-check", tags=["Alerts & Registration"])
 def trigger_fire_check():
-    """
-    Manually triggers the fire check worker for testing.
-    """
     print("ADMIN: Manual fire check triggered.")
     asyncio.create_task(fire_alert_worker_manual())
     return {"status": "success", "message": "Manual fire check task created. Check logs for details."}
@@ -673,11 +660,15 @@ async def fire_alert_worker_manual():
         
     try:
         with engine.connect() as conn:
+            
+            # ⭐️ 3. APPLY SAME FIX to manual worker ⭐️
+            location_as_geometry = func.cast(registered_zones_table.c.location, Geometry)
+            
             stmt = select(
                 registered_zones_table.c.zone_name,
                 registered_zones_table.c.phone_number,
-                func.ST_X(registered_zones_table.c.location).label('lon'),
-                func.ST_Y(registered_zones_table.c.location).label('lat')
+                func.ST_X(location_as_geometry).label('lon'), # <-- FIXED
+                func.ST_Y(location_as_geometry).label('lat')  # <-- FIXED
             )
             all_zones = conn.execute(stmt).fetchall()
             print(f"MANUAL WORKER: Found {len(all_zones)} zone(s).")
@@ -727,10 +718,10 @@ def _parse_landmap_response(response_json):
     }
     units = {
         "ph": {"unit": "pH", "scale": 0.1},
-        "N": {"unit": "g/kg", "scale": 0.01}, # Scaling N by 100
-        "P": {"unit": "mg/kg", "scale": 0.1}, # Scaling P by 10
-        "K": {"unit": "mg/kg", "scale": 0.1}, # Scaling K by 10
-        "soc": {"unit": "g/kg", "scale": 0.1} # Scaling SOC by 10
+        "N": {"unit": "g/kg", "scale": 0.01},
+        "P": {"unit": "mg/kg", "scale": 0.1},
+        "K": {"unit": "mg/kg", "scale": 0.1},
+        "soc": {"unit": "g/kg", "scale": 0.1}
     }
     
     if "layers" not in response_json:
@@ -745,6 +736,16 @@ def _parse_landmap_response(response_json):
             else:
                 parsed_data[key] = {"value": None, "unit": units[key].get("unit")}
         else:
+            # Check for a common typo in the K layer name from your original file
+            if key == 'K':
+                typo_layer = "k.ext_usda.4g1a1_m_250m_b0cm_2s018" # The 's' typo
+                if typo_layer in response_json["layers"]:
+                    raw_value = response_json["layers"][typo_layer]["value"]
+                    if raw_value is not None:
+                         scaled_value = round(raw_value * units[key]["scale"], 2)
+                         parsed_data[key] = {"value": scaled_value, "unit": units[key]["unit"], "warning": "Used fallback layer name"}
+                         continue
+            
             parsed_data[key] = {"value": None, "unit": "N/A", "error": f"Layer '{layer_name}' not found in response"}
             
     return parsed_data
