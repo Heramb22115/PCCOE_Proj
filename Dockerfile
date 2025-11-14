@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Copy the NEW backend-only requirements file
-COPY backend-requirements.txt .
+COPY requirements.txt .
 
 # 3. Install Python dependencies
 # Must install GDAL first to match system library
