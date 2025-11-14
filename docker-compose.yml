@@ -1,5 +1,4 @@
-version: '3.8'
-
+# 'version: 3.8' has been removed
 services:
   db:
     image: postgis/postgis:16-3.4
@@ -12,6 +11,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Healthcheck to ensure backend waits until PostGIS is ready
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d reforestation"]
       interval: 10s
@@ -23,6 +23,8 @@ services:
     container_name: reforestation_backend
     ports:
       - "8000:8000"
+      - "8501:8501" # <-- IMPORTANT: I added this line
+    # Make sure backend waits for the DB to be healthy
     depends_on:
       db:
         condition: service_healthy
@@ -34,8 +36,6 @@ services:
       - DB_PASS=password
       - DB_NAME=reforestation
       - DB_PORT=5432
-      # Pass Google API key from .env file
-      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
 
 volumes:
   postgres_data:
