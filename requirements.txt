@@ -11,3 +11,5 @@ twilio
 streamlit-folium
 reportlab
 streamlit-js-eval
+googlemaps
+altair
