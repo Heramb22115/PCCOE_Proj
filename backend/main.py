@@ -3,6 +3,7 @@ import io
 import os
 import time
 from typing import Any, Dict, List, Optional
+from dotenv import load_dotenv # Import dotenv
 
 import joblib
 import pandas as pd
@@ -19,8 +20,11 @@ from sqlalchemy import (Column, Integer, MetaData, String, Table, create_engine,
 from sqlalchemy.exc import OperationalError
 from twilio.rest import Client
 
-# --- API Keys & Secrets ---
-OPENWEATHER_API_KEY = "fc15e1b874046adab12c981b6f0dab30"
+# --- Load Environment Variables ---
+load_dotenv()
+
+# --- API Keys & Secrets (FIXED: Loaded from .env) ---
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY") # FIXED
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
@@ -38,21 +42,21 @@ _MOCK_DATA_CATALOG = {
     "Tadoba National Park (Protected)": {
         "coords": {"lat": 20.2505, "lon": 79.3377},
         "land_type": "Protected Forest", # NEW: Land type flag
-        "soil": {"ph": {"value": 6.8}, "N": {"value": 150.0}, "P": {"value": 22.0}, "K": {"value": 140.0}},
+        "soil": {"ph": {"value": 6.8}, "N": {"value": 150.0}, "P": {"value": 22.0}, "K": {"value": 140.0}, "soc": {"value": 18.0}},
         "weather": {"temperature": 27.0, "humidity": 70.0, "rainfall": 0.2},
         "crop": "coffee" # (Would be blocked, but good for data)
     },
     "Solapur Barren Land (Wasteland)": {
         "coords": {"lat": 17.6599, "lon": 75.9064},
         "land_type": "Wasteland",
-        "soil": {"ph": {"value": 7.9}, "N": {"value": 25.0}, "P": {"value": 30.0}, "K": {"value": 35.0}},
+        "soil": {"ph": {"value": 7.9}, "N": {"value": 25.0}, "P": {"value": 30.0}, "K": {"value": 35.0}, "soc": {"value": 5.0}},
         "weather": {"temperature": 32.0, "humidity": 40.0, "rainfall": 0.0},
         "crop": "chickpea"
     },
     "Sanjay Park, India (Degraded)": {
         "coords": {"lat": 19.2296, "lon": 72.8711},
         "land_type": "Reforestation Candidate",
-        "soil": {"ph": {"value": 6.8}, "N": {"value": 90.0}, "P": {"value": 42.0}, "K": {"value": 43.0}},
+        "soil": {"ph": {"value": 6.8}, "N": {"value": 90.0}, "P": {"value": 42.0}, "K": {"value": 43.0}, "soc": {"value": 11.0}},
         "weather": {"temperature": 29.0, "humidity": 80.0, "rainfall": 0.5},
         "crop": "rice"
     }
@@ -80,11 +84,11 @@ _MOCK_CARBON_RATES = {
     "kidneybeans": 1.7, "chickpea": 1.8, "coffee": 4.0, "default": 2.0
 }
 REFORESTATION_CROPS = [
-    'coffee', 'coconut', 'papaya', 'orange', 'apple', 
+    'coffee', 'coconut', 'papaya', 'orange', 'apple',
     'grapes', 'mango', 'banana', 'pomegranate'
 ]
 # Soil Organic Carbon threshold (in g/kg) to be considered an existing forest
-EXISTING_FOREST_SOC_THRESHOLD = 15.0 
+EXISTING_FOREST_SOC_THRESHOLD = 15.0
 
 # --- Pydantic Models ---
 class PlotCoordinates(BaseModel):
@@ -105,24 +109,34 @@ class CropPredictionInputs(BaseModel):
     N: float; P: float; K: float;
     temperature: float; humidity: float; ph: float; rainfall: float
 
+# FIXED: Matches UI Screenshot #7 (Age is optional, defaults to 10)
 class CarbonCreditInputs(BaseModel):
-    crop_type: str; age_years: int; area_hectares: float
+    crop_type: str
+    area_hectares: float
+    age_years: int = 10 # Default to 10 years
 
 class ZoneRegistration(BaseModel):
     zone_name: str; latitude: float; longitude: float; phone_number: str
 
 class ReportData(BaseModel):
+    # This model is for the PDF endpoint, needs to match the new flat structure
     report_status: str
     coordinates: Dict[str, Any]
-    crop_recommendation: Dict[str, Any]
+    suitability_assessment: str
+    recommended_crop: str
     fetched_soil_data: Dict[str, Any]
     fetched_weather_data: Dict[str, Any]
-    suitability_analysis: Optional[Dict[str, str]] = None
+    # Keep the detailed objects optional for PDF generation
+    crop_recommendation_details: Optional[Dict[str, Any]] = None
+    suitability_analysis_details: Optional[Dict[str, Any]] = None
+    location_name: Optional[str] = "N/A"
+    is_already_registered: Optional[bool] = False
+
 
 # --- FastAPI App ---
 app = FastAPI(title="Reforestation Project API")
 engine = None
-crop_model = None 
+crop_model = None
 twilio_client = None
 db_metadata = MetaData()
 
@@ -132,7 +146,7 @@ registered_zones_table = Table(
     Column('id', Integer, primary_key=True, autoincrement=True),
     Column('zone_name', String(255)), # No longer unique
     Column('phone_number', String(50)),
-    Column('location', Geography(geometry_type='POINT', srid=4326)) 
+    Column('location', Geography(geometry_type='POINT', srid=4326))
 )
 
 def create_tables():
@@ -140,12 +154,12 @@ def create_tables():
     try:
         with engine.connect() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
-            conn.commit() 
-            
+            conn.commit()
+
             inspector = inspect(conn)
             if not inspector.has_table('registered_zones'):
                 registered_zones_table.create(conn)
-                conn.commit() 
+                conn.commit()
                 print("Table 'registered_zones' created.")
             else:
                 print("Table 'registered_zones' already exists.")
@@ -155,7 +169,7 @@ def create_tables():
 @app.on_event("startup")
 def startup_event():
     global engine, crop_model, twilio_client
-    
+
     # Connect to DB
     retries = 5; delay = 5
     for i in range(retries):
@@ -168,7 +182,7 @@ def startup_event():
         except OperationalError:
             print(f"Database connection failed. Retrying... ({i+1}/{retries})")
             time.sleep(delay)
-    
+
     # Load ML Model
     try:
         crop_model = joblib.load("rf_crop_recommendation_model.pkl")
@@ -182,13 +196,13 @@ def startup_event():
             print("Twilio client initialized successfully.")
         except Exception as e: print(f"Error initializing Twilio client: {e}"); twilio_client = None
     else: print("Twilio credentials not found. WhatsApp alerts will be disabled.")
-    
+
     # --- NEW: Start the background worker ---
     print("Starting background fire alert worker (30 min loop)...")
     asyncio.create_task(fire_alert_worker())
 
 def send_whatsapp_message(to_number: str, body: str):
-    if not twilio_client: 
+    if not twilio_client:
         print(f"Twilio not configured. SKIPPING message to {to_number}")
         return {"status": "skipped", "reason": "Twilio not configured"}
     try:
@@ -205,7 +219,20 @@ def read_root(): return {"message": "Welcome to the AI-Driven Reforestation API!
 
 @app.get("/api/health", tags=["Monitoring"])
 def get_health_check():
-    return {"api_status": "ok", "database_status": "connected (logic moved to startup)"}
+    # Simple health check, startup handles the complex logic
+    db_ok = False
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            db_ok = True
+    except Exception as e:
+        print(f"Health check DB error: {e}")
+    
+    return {
+        "api_status": "ok", 
+        "database_status": "connected" if db_ok else "disconnected"
+    }
+
 
 # --- Data Acquisition Endpoints ---
 @app.post("/api/get-soil-data", tags=["Data Acquisition"])
@@ -214,7 +241,7 @@ def get_soil_data(coordinates: PlotCoordinates):
         if coordinates.mock_site in _MOCK_DATA_CATALOG:
             return _MOCK_DATA_CATALOG[coordinates.mock_site]["soil"]
         else: raise HTTPException(status_code=404, detail=f"Mock site '{coordinates.mock_site}' not found.")
-    
+
     LANDGIS_URL = "https://landgisapi.opengeohub.org/query/point"
     layers_to_query = [
         "ph.h2o_usda.4c1a2a_m_250m_b0cm_2018", # pH
@@ -224,12 +251,12 @@ def get_soil_data(coordinates: PlotCoordinates):
         "soc.usda.6a1c_m_250m_b0cm_2018"      # Soil Organic Carbon (SOC)
     ]
     params = {'lon': coordinates.longitude, 'lat': coordinates.latitude, 'layers': ",".join(layers_to_query)}
-    
+
     try:
         r = requests.get(LANDGIS_URL, params=params, timeout=20)
         r.raise_for_status()
         return _parse_landmap_response(r.json())
-    except requests.exceptions.RequestException as e: 
+    except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=504, detail=f"Failed to connect to OpenLandMap API: {str(e)}")
 
 @app.post("/api/get-weather-data", tags=["Data Acquisition"])
@@ -238,12 +265,12 @@ def get_weather_data(coordinates: PlotCoordinates):
         if coordinates.mock_site in _MOCK_DATA_CATALOG:
             return _MOCK_DATA_CATALOG[coordinates.mock_site]["weather"]
         else: raise HTTPException(status_code=404, detail=f"Mock site '{coordinates.mock_site}' not found.")
-    
+
     if not OPENWEATHER_API_KEY: raise HTTPException(status_code=400, detail="OpenWeatherMap API key is not configured")
-    
+
     WEATHER_URL = "https://api.openweathermap.org/data/3.0/onecall"
     params = {'lat': coordinates.latitude, 'lon': coordinates.longitude, 'appid': OPENWEATHER_API_KEY, 'units': 'metric', 'exclude': 'minutely,hourly,daily,alerts'}
-    
+
     try:
         response = requests.get(WEATHER_URL, params=params, timeout=10)
         response.raise_for_status()
@@ -251,23 +278,23 @@ def get_weather_data(coordinates: PlotCoordinates):
         current_data = data['current']
         rainfall = current_data.get('rain', {}).get('1h', 0.0)
         return {"temperature": current_data.get('temp'), "humidity": current_data.get('humidity'), "rainfall": rainfall}
-    except Exception as e: 
+    except Exception as e:
         raise HTTPException(status_code=504, detail=f"Failed to connect to OpenWeatherMap API: {str(e)}")
 
 @app.post("/api/get-fire-events", tags=["Data Acquisition"])
 def get_fire_events(bbox: BoundingBox):
-    if bbox.dev_mode: 
+    if bbox.dev_mode:
         return _MOCK_FIRE_DATA.get(bbox.mock_site, {"events": []})
 
     EONET_URL = "https://eonet.gsfc.nasa.gov/api/v3/events"
     bbox_str = f"[{bbox.min_lon},{bbox.min_lat},{bbox.max_lon},{bbox.max_lat}]"
     params = {'category': 'wildfires', 'status': 'open', 'bbox': bbox_str}
-    
+
     try:
         r = requests.get(EONET_URL, params=params, timeout=20)
         r.raise_for_status()
         return r.json()
-    except Exception as e: 
+    except Exception as e:
         raise HTTPException(status_code=504, detail=f"Failed to connect to NASA EONET API: {e}")
 
 # --- AI Model Endpoint ---
@@ -275,7 +302,16 @@ def get_fire_events(bbox: BoundingBox):
 def get_crop_recommendation(inputs: CropPredictionInputs):
     if crop_model is None: raise HTTPException(status_code=503, detail="Crop model is not loaded.")
     try:
-        input_df = pd.DataFrame([inputs.dict()], columns=inputs.dict().keys())
+        # Ensure order matches training: N, P, K, temp, humidity, ph, rainfall
+        input_data = [
+            inputs.N, inputs.P, inputs.K, 
+            inputs.temperature, inputs.humidity, inputs.ph, inputs.rainfall
+        ]
+        # Create DataFrame with explicit column order to be safe
+        input_df = pd.DataFrame([input_data], columns=[
+            'N', 'P', 'K', 'temperature', 'humidity', 'ph', 'rainfall'
+        ])
+        
         prediction = crop_model.predict(input_df)
         return {"recommended_crop": prediction[0], "input_features": inputs.dict()}
     except Exception as e:
@@ -287,30 +323,34 @@ def get_full_report(coordinates: PlotCoordinates):
     print(f"Generating full report for {coordinates.dict()}")
     crop_recommendation = {}
     recommended_crop = None
-    
+    is_registered = False # FIXED: Flag to match UI
+    suitability_analysis = {}
+
     if coordinates.dev_mode:
         if coordinates.mock_site not in _MOCK_DATA_CATALOG:
             raise HTTPException(status_code=404, detail="Mock site not found.")
-        
+
         print(f"DEV MODE: Using mock data for {coordinates.mock_site}")
         mock_data = _MOCK_DATA_CATALOG[coordinates.mock_site]
-        
-        # NEW: Check for protected land in mock data
+
+        # Check for protected land in mock data
         if mock_data.get("land_type") == "Protected Forest":
-            raise HTTPException(
-                status_code=409, # 409 Conflict
-                detail=f"Site Not Suitable: This location ({coordinates.mock_site}) is a protected forest and cannot be used for new planting."
+             suitability_analysis["recommendation"] = "Not Suitable"
+             suitability_analysis["reason"] = f"This location ({coordinates.mock_site}) is a protected forest and cannot be used for new planting."
+             recommended_crop = "N/A"
+             soil_data = mock_data["soil"]
+             weather_data = mock_data["weather"]
+             crop_recommendation = {"recommended_crop": "N/A", "input_features": "N/A"}
+        else:
+            soil_data = mock_data["soil"]
+            weather_data = mock_data["weather"]
+            recommended_crop = mock_data["crop"]
+            model_inputs = CropPredictionInputs(
+                N=soil_data.get('N').get('value'), P=soil_data.get('P').get('value'), K=soil_data.get('K').get('value'),
+                temperature=weather_data.get('temperature'), humidity=weather_data.get('humidity'),
+                ph=soil_data.get('ph').get('value'), rainfall=weather_data.get('rainfall')
             )
-            
-        soil_data = mock_data["soil"]
-        weather_data = mock_data["weather"]
-        recommended_crop = mock_data["crop"]
-        model_inputs = CropPredictionInputs(
-            N=soil_data.get('N').get('value'), P=soil_data.get('P').get('value'), K=soil_data.get('K').get('value'),
-            temperature=weather_data.get('temperature'), humidity=weather_data.get('humidity'),
-            ph=soil_data.get('ph').get('value'), rainfall=weather_data.get('rainfall')
-        )
-        crop_recommendation = {"recommended_crop": recommended_crop, "input_features": model_inputs.dict()}
+            crop_recommendation = {"recommended_crop": recommended_crop, "input_features": model_inputs.dict()}
 
     else:
         print("LIVE MODE: Checking database and fetching live data...")
@@ -324,60 +364,82 @@ def get_full_report(coordinates: PlotCoordinates):
                 )
             )
             existing_zone = conn.execute(stmt).first()
+            # FIXED: Set flag instead of raising error, to match UI
             if existing_zone:
-                raise HTTPException(
-                    status_code=409, 
-                    detail=f"This location is already registered as part of the '{existing_zone.zone_name}' zone (within 500m) and cannot be planted again."
-                )
-        
+                is_registered = True
+                print(f"Note: This location is already registered as part of the '{existing_zone.zone_name}' zone.")
+
         try:
             soil_data = get_soil_data(coordinates)
-            
-            # NEW: Check for existing forest based on live Soil Organic Carbon (SOC)
+
+            # Check for existing forest based on live Soil Organic Carbon (SOC)
             soc_value = soil_data.get('soc', {}).get('value', 0.0)
             if soc_value is not None and soc_value > EXISTING_FOREST_SOC_THRESHOLD:
-                 raise HTTPException(
-                    status_code=409, 
-                    detail=f"Site Not Suitable: This location appears to be an existing forest (Soil Organic Carbon is {soc_value} g/kg, which is above the {EXISTING_FOREST_SOC_THRESHOLD} g/kg threshold)."
+                 suitability_analysis["recommendation"] = "Not Suitable"
+                 suitability_analysis["reason"] = f"Site appears to be an existing forest (Soil Organic Carbon is {soc_value} g/kg, above threshold)."
+                 recommended_crop = "N/A"
+                 weather_data = get_weather_data(coordinates) # Still get weather
+                 crop_recommendation = {"recommended_crop": "N/A", "input_features": "N/A"}
+            
+            else:
+                # Only run model if not a forest
+                weather_data = get_weather_data(coordinates)
+                model_inputs = CropPredictionInputs(
+                    N=soil_data.get('N', {}).get('value') or 90.0,
+                    P=soil_data.get('P', {}).get('value') or 42.0,
+                    K=soil_data.get('K', {}).get('value') or 43.0,
+                    temperature=weather_data.get('temperature') or 20.0,
+                    humidity=weather_data.get('humidity') or 80.0,
+                    ph=soil_data.get('ph', {}).get('value') or 6.5,
+                    rainfall=weather_data.get('rainfall') or 200.0
                 )
+                crop_recommendation = get_crop_recommendation(model_inputs)
+                recommended_crop = crop_recommendation.get("recommended_crop")
 
-            weather_data = get_weather_data(coordinates)
-            model_inputs = CropPredictionInputs(
-                N=soil_data.get('N', {}).get('value') or 90.0,
-                P=soil_data.get('P', {}).get('value') or 42.0,
-                K=soil_data.get('K', {}).get('value') or 43.0,
-                temperature=weather_data.get('temperature') or 20.0,
-                humidity=weather_data.get('humidity') or 80.0,
-                ph=soil_data.get('ph', {}).get('value') or 6.5,
-                rainfall=weather_data.get('rainfall') or 200.0
-            )
-            crop_recommendation = get_crop_recommendation(model_inputs)
-            recommended_crop = crop_recommendation.get("recommended_crop")
         except Exception as e:
+            # Catch exceptions from API calls or model
+            print(f"Error during live data processing: {e}")
             raise HTTPException(status_code=500, detail=f"An error occurred during live data fetching: {str(e)}")
 
-    suitability_analysis = {}
-    if recommended_crop in REFORESTATION_CROPS:
-        suitability_analysis["recommendation"] = "Suitable for Reforestation"
-        suitability_analysis["reason"] = f"The model recommended '{recommended_crop}', which is a high-value, long-term reforestation crop."
-    else:
-        suitability_analysis["recommendation"] = "Suitable for Agriculture"
-        suitability_analysis["reason"] = f"The model recommended '{recommended_crop}', which is a short-term agricultural crop. This area is better for farming."
-    
+    # Suitability Analysis (only if not already decided)
+    if not suitability_analysis:
+        if recommended_crop in REFORESTATION_CROPS:
+            suitability_analysis["recommendation"] = "Suitable for Reforestation"
+            suitability_analysis["reason"] = f"The model recommended '{recommended_crop}', which is a high-value, long-term reforestation crop."
+        else:
+            suitability_analysis["recommendation"] = "Suitable for Agriculture"
+            suitability_analysis["reason"] = f"The model recommended '{recommended_crop}', which is a short-term agricultural crop. This area is better for farming."
+
+    # FIXED: Return structure matches what app.py expects
     return {
-        "report_status": "Success", "coordinates": coordinates.dict(),
-        "crop_recommendation": crop_recommendation, "fetched_soil_data": soil_data,
-        "fetched_weather_data": weather_data, "suitability_analysis": suitability_analysis
+        "report_status": "Success",
+        "coordinates": coordinates.dict(),
+        "fetched_soil_data": soil_data,
+        "fetched_weather_data": weather_data,
+        
+        # Detailed objects for PDF
+        "crop_recommendation_details": crop_recommendation,
+        "suitability_analysis_details": suitability_analysis,
+        
+        # Flat keys for UI (Screenshot #5)
+        "recommended_crop": recommended_crop,
+        "suitability_assessment": suitability_analysis.get("recommendation", "N/A"),
+        "location_name": coordinates.mock_site if (coordinates.dev_mode and coordinates.mock_site) else f"Site at {coordinates.latitude:.3f}, {coordinates.longitude:.3f}",
+        "is_already_registered": is_registered
     }
+
 
 # --- Carbon Credits Endpoint ---
 @app.post("/api/estimate-carbon-credits", tags=["Carbon Credits"])
 def estimate_carbon_credits(inputs: CarbonCreditInputs):
     crop_key = inputs.crop_type.lower()
     rate = _MOCK_CARBON_RATES.get(crop_key, _MOCK_CARBON_RATES["default"])
+    
+    # Total CO2 sequestered over the *entire* period
     total_co2_sequestered = rate * inputs.area_hectares * inputs.age_years
+    
     return {
-        "carbon_credits": round(total_co2_sequestered, 2),
+        "carbon_credits": round(total_co2_sequestered, 2), # This is the total
         "calculation_details": {
             "crop_type": inputs.crop_type,
             "sequestration_rate_per_ha_yr": rate,
@@ -394,7 +456,7 @@ def register_zone(registration: ZoneRegistration):
     try:
         with engine.connect() as conn:
             point_wkt = f'POINT({registration.longitude} {registration.latitude})'
-            
+
             # NEW: Check for location proximity (100m) instead of unique name
             stmt_check = select(registered_zones_table).where(
                 func.ST_DWithin(
@@ -409,7 +471,7 @@ def register_zone(registration: ZoneRegistration):
                     status_code=409, # 409 Conflict
                     detail=f"This location is already registered (within 100m) as part of the '{existing_zone.zone_name}' zone. Cannot register duplicate plot."
                 )
-            
+
             # If no conflict, insert the new zone
             stmt = insert(registered_zones_table).values(
                 zone_name=registration.zone_name,
@@ -419,7 +481,7 @@ def register_zone(registration: ZoneRegistration):
             conn.execute(stmt)
             conn.commit()
             print("Zone successfully saved to database.")
-            
+
     except HTTPException as e: raise e # Re-raise our own 409 error
     except Exception as e:
         print(f"Error saving to database: {e}")
@@ -431,7 +493,7 @@ def register_zone(registration: ZoneRegistration):
         f"📍 Location: ({registration.latitude:.4f}, {registration.longitude:.4f})\n\n"
         f"You will now receive critical alerts (like fire warnings) for this zone at this number. 🔥🌲"
     )
-        
+
     message_status = send_whatsapp_message(
         to_number=registration.phone_number,
         body=body
@@ -448,7 +510,7 @@ def get_pdf_report(report_data: ReportData):
         buffer = io.BytesIO()
         p = canvas.Canvas(buffer, pagesize=letter)
         width, height = letter
-        
+
         y = height - inch
         p.setFont("Helvetica-Bold", 16)
         p.drawCentredString(width / 2.0, y, "Smart Site Suitability Report")
@@ -458,14 +520,15 @@ def get_pdf_report(report_data: ReportData):
         p.setFont("Helvetica-Bold", 12)
         p.drawString(inch, y, "1. Suitability Assessment")
         y -= 0.25*inch
-        
-        suitability = report_data.suitability_analysis.get('recommendation', 'N/A')
+
+        suitability = report_data.suitability_assessment
         p.setFont("Helvetica-Bold", 11)
         p.drawString(inch * 1.2, y, f"Assessment: {suitability}")
         y -= 0.25*inch
-        
+
         p.setFont("Helvetica", 10)
-        reason = report_data.suitability_analysis.get('reason', 'N/A')
+        # Get reason from the detailed object
+        reason = report_data.suitability_analysis_details.get('reason', 'N/A')
         p.drawString(inch * 1.2, y, f"Reason: {reason}")
         y -= 0.5*inch
 
@@ -473,15 +536,15 @@ def get_pdf_report(report_data: ReportData):
         p.setFont("Helvetica-Bold", 12)
         p.drawString(inch, y, "2. AI Recommendation")
         y -= 0.25*inch
-        
+
         p.setFont("Helvetica", 10)
         lat = report_data.coordinates.get('latitude', 0.0)
         lon = report_data.coordinates.get('longitude', 0.0)
         p.drawString(inch * 1.2, y, f"For Coordinates: ({lat:.4f}, {lon:.4f})")
         y -= 0.25*inch
-        
+
         p.setFont("Helvetica-Bold", 11)
-        crop = report_data.crop_recommendation.get('recommended_crop', 'N/A').title()
+        crop = report_data.recommended_crop.title()
         p.drawString(inch * 1.2, y, f"Recommended Crop: {crop}")
         y -= 0.5*inch
 
@@ -523,7 +586,7 @@ def get_pdf_report(report_data: ReportData):
         p.showPage()
         p.save()
         buffer.seek(0)
-        
+
         return StreamingResponse(buffer, media_type="application/pdf", headers={
             "Content-Disposition": "attachment; filename=Reforestation_Report.pdf"
         })
@@ -537,9 +600,10 @@ async def fire_alert_worker():
     Runs in the background, checking for fires every 30 minutes.
     """
     await asyncio.sleep(10) # Initial delay to let server start
-    
+
     while True:
         print("WORKER: Running scheduled fire check for all registered zones...")
+        alerts_sent_count = 0
         try:
             with engine.connect() as conn:
                 # Get all registered zones from the DB
@@ -554,25 +618,24 @@ async def fire_alert_worker():
 
                 for zone in all_zones:
                     zone_name, phone_number, lon, lat = zone
-                    
+
                     # Create a 50km bounding box around the zone's center point
-                    # This is a large area, as fire events are not precise
                     bbox = BoundingBox(
                         min_lon=lon - 0.25, min_lat=lat - 0.25,
                         max_lon=lon + 0.25, max_lat=lat + 0.25,
                         dev_mode=False # Always use live fire data for alerts
                     )
-                    
+
                     print(f"WORKER: Checking for fires near '{zone_name}' ({lat:.2f}, {lon:.2f})...")
-                    
+
                     # Call the live EONET API
                     fire_data = get_fire_events(bbox)
-                    
+
                     if fire_data.get("events"):
                         num_events = len(fire_data["events"])
                         fire_title = fire_data["events"][0].get("title", "Unknown Fire")
                         print(f"WORKER: 🔥 FIRE DETECTED for '{zone_name}'! Sending alert...")
-                        
+
                         body = (
                             f"🔥🔥🔥 FIRE ALERT 🔥🔥🔥\n\n"
                             f"A new fire has been detected near your registered zone: *{zone_name}*.\n\n"
@@ -582,36 +645,42 @@ async def fire_alert_worker():
                             f"Please check the area and take necessary precautions."
                         )
                         send_whatsapp_message(to_number=phone_number, body=body)
+                        alerts_sent_count += 1
                     else:
                         print(f"WORKER: No fires found for '{zone_name}'.")
 
                     # Small delay to avoid hitting API rate limits
-                    await asyncio.sleep(5) 
-            
+                    await asyncio.sleep(5)
+
         except Exception as e:
             print(f"WORKER: Error during fire check: {e}")
 
         # Wait for 30 minutes before running again
-        print("WORKER: Fire check complete. Sleeping for 30 minutes...")
+        print(f"WORKER: Fire check complete. {alerts_sent_count} alerts sent. Sleeping for 30 minutes...")
         await asyncio.sleep(1800) # 1800 seconds = 30 minutes
 
 # --- Manual Trigger for Fire Check (for testing) ---
 @app.post("/api/trigger-fire-check", tags=["Alerts & Registration"])
-def trigger_fire_check():
+async def trigger_fire_check():
     """
-    Manually triggers the fire check worker for testing.
-    This will run in the background.
+    Manually triggers a *single run* of the fire check worker for testing.
+    This will run in the background and return a status.
     """
     print("ADMIN: Manual fire check triggered.")
-    asyncio.create_task(fire_alert_worker_manual())
-    return {"status": "success", "message": "Fire check worker has been manually triggered. Check logs and phone for alerts."}
+    # Run the check one time, not in a loop
+    alerts_sent = await fire_alert_worker_manual(use_mock=True) 
+    return {
+        "status": "success", 
+        "message": "Manual fire check complete. Check logs and phone for test alerts.",
+        "alerts_sent": alerts_sent
+    }
 
-async def fire_alert_worker_manual():
+async def fire_alert_worker_manual(use_mock: bool = False):
     """
     A single run of the fire alert worker for manual testing.
-    Uses Dev Mode to force a test alert.
     """
     print("MANUAL WORKER: Running manual fire check...")
+    alerts_sent_count = 0
     try:
         with engine.connect() as conn:
             stmt = select(
@@ -625,45 +694,42 @@ async def fire_alert_worker_manual():
 
             if not all_zones:
                 print("MANUAL WORKER: No zones registered. Aborting test.")
-                return
+                return 0
 
-            # Test on the first registered zone
-            zone_name, phone_number, lon, lat = all_zones[0]
-            
-            # --- Use MOCK FIRE DATA for the test ---
-            # We must find which mock site (if any) is nearby
-            mock_site_to_use = "Sanjay Park, India (Degraded)" # Default
-            for site in _MOCK_DATA_CATALOG:
-                mock_coords = _MOCK_DATA_CATALOG[site]["coords"]
-                if abs(mock_coords["lat"] - lat) < 0.1 and abs(mock_coords["lon"] - lon) < 0.1:
-                    mock_site_to_use = site
-                    break
-            
-            print(f"MANUAL WORKER: Testing alert for zone '{zone_name}' using mock data for '{mock_site_to_use}'...")
-            
-            bbox = BoundingBox(
-                min_lon=lon - 0.25, min_lat=lat - 0.25,
-                max_lon=lon + 0.25, max_lat=lat + 0.25,
-                dev_mode=True,
-                mock_site=mock_site_to_use
-            )
-            fire_data = get_fire_events(bbox)
-            
-            if fire_data.get("events"):
-                fire_title = fire_data["events"][0].get("title", "Unknown Fire")
-                print(f"MANUAL WORKER: 🔥 MOCK FIRE DETECTED for '{zone_name}'! Sending test alert...")
-                body = (
-                    f"🔥🔥🔥 *TEST* FIRE ALERT 🔥🔥🔥\n\n"
-                    f"This is a test of the alert system for your zone: *{zone_name}*.\n\n"
-                    f"Event: *{fire_title}*\n"
-                    f"Location: ({lat:.4f}, {lon:.4f})"
+            # Test on all registered zones
+            for zone in all_zones:
+                zone_name, phone_number, lon, lat = zone
+                
+                bbox = BoundingBox(
+                    min_lon=lon - 0.25, min_lat=lat - 0.25,
+                    max_lon=lon + 0.25, max_lat=lat + 0.25,
+                    dev_mode=use_mock,
+                    mock_site="Sanjay Park, India (Degraded)" # Default mock
                 )
-                send_whatsapp_message(to_number=phone_number, body=body)
-            else:
-                 print(f"MANUAL WORKER: No mock fires found for '{mock_site_to_use}'. No alert sent.")
+                
+                print(f"MANUAL WORKER: Checking zone '{zone_name}' (Mock={use_mock})...")
+                fire_data = get_fire_events(bbox)
+
+                if fire_data.get("events"):
+                    fire_title = fire_data["events"][0].get("title", "Unknown Fire")
+                    print(f"MANUAL WORKER: 🔥 MOCK FIRE DETECTED for '{zone_name}'! Sending test alert...")
+                    body = (
+                        f"🔥🔥🔥 *TEST* FIRE ALERT 🔥🔥🔥\n\n"
+                        f"This is a test of the alert system for your zone: *{zone_name}*.\n\n"
+                        f"Event: *{fire_title}*\n"
+                        f"Location: ({lat:.4f}, {lon:.4f})"
+                    )
+                    send_whatsapp_message(to_number=phone_number, body=body)
+                    alerts_sent_count += 1
+                else:
+                    print(f"MANUAL WORKER: No mock fires found for '{zone_name}'. No alert sent.")
+                
+                await asyncio.sleep(2) # Avoid rate limits
 
     except Exception as e:
         print(f"MANUAL WORKER: Error during manual fire check: {e}")
+    
+    return alerts_sent_count
 
 # Helper: Parse OpenLandMap Response
 def _parse_landmap_response(response_json):
@@ -682,10 +748,10 @@ def _parse_landmap_response(response_json):
         "K": {"unit": "mg/kg", "scale": 0.1}, # Scaling K by 10
         "soc": {"unit": "g/kg", "scale": 0.1} # Scaling SOC by 10
     }
-    
+
     if "layers" not in response_json:
         return {"error": "Invalid response from OpenLandMap", "data": response_json}
-        
+
     for key, layer_name in layers.items():
         if layer_name in response_json["layers"]:
             raw_value = response_json["layers"][layer_name]["value"]
@@ -698,5 +764,5 @@ def _parse_landmap_response(response_json):
         else:
             # Layer itself wasn't found in the response
             parsed_data[key] = {"value": None, "unit": "N/A", "error": f"Layer '{layer_name}' not found in response"}
-            
+
     return parsed_data
